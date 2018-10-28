@@ -1,0 +1,400 @@
+			+--------------------+
+			|       CS 330       |
+			| PROJECT 1: THREADS |
+			|   DESIGN DOCUMENT  |
+			+--------------------+
+				   
+---- GROUP ----
+
+>> Fill in the names and email addresses of your group members.
+team 25
+Chanwook Lee <cksdnr314@kaist.ac.kr>, contribution 50%
+Yunju Bak <dbswndigh@kaist.ac.kr>, contribution 50%
+
+---- PRELIMINARIES ----
+
+>> If you have any preliminary comments on your submission, notes for the
+>> TAs, usage of tokens, or extra credit, please give them here.
+없음
+
+>> Please cite any offline or online sources you consulted while
+>> preparing your submission, other than the Pintos documentation, course
+>> text, lecture notes, and course staff.
+없음
+
+			     ALARM CLOCK
+			     ===========
+
+---- DATA STRUCTURES ----
+
+>> A1: Copy here the declaration of each new or changed `struct' or
+>> `struct' member, global or static variable, `typedef', or
+>> enumeration.  Identify the purpose of each in 25 words or less.
+/* timer.c 파일 안 */
+static struct list wait_list;
+/* timer_sleep에 의해 잠든 thread들에 대한 정보를 담기 위한 list struct. */
+
+struct waiting_elem
+  {
+    struct thread * thread;
+    int64_t wake_time;
+    struct list_elem elem;
+  };
+/* wait_list의 원소 elem을 잠든 thread, 해당 thread의 일어날 시각(wake_time)과 함께 묶어주기 위함. */
+
+---- ALGORITHMS ----
+
+>> A2: Briefly describe what happens in a call to timer_sleep(),
+>> including the effects of the timer interrupt handler.
+timer_sleep(ticks)가 불려지면,
+1)interrupt를 disable한다.
+2)현재 쓰레드와 일어날 시각*을 묶어서 wait_list에 일어날 시각이 빠른 순서로 정렬해 넣는다.
+3)쓰레드를 block한다
+4)interrupt를 reset한다.
+* 2)에서 일어날 시각은 global ticks에 argument로 받은 ticks를 더해서 구한다.
+이후 timer_interrupt에서 매 tick마다,
+1)interrupt를 disable한다.
+2)global ticks를 증가시킨다.
+3)현재 global tick를 now 변수에 저장한다.
+4)wait_list를 탐색하며 일어날 시각을 now와 비교해 깨워야 할 thread를 찾는데, 
+빨리 일어나는 순서로 정렬되어 있으므로, 앞 원소가 깨어날 수 없으면, 뒷 원소도 없음을 이용해 break문을 써서 빠져나온다.
+5)interrupt를 reset한다.
+
+>> A3: What steps are taken to minimize the amount of time spent in
+>> the timer interrupt handler?
+timer interrupt handler에서 탐색하는 시간을 줄이기 위해 wait_list를 만들어서 탐색해야하는 thread들의 개수를 줄였다. wait_list에 각 thread마다 일어나야 하는 시각을 저장함으로써 비교하는데 시간을 줄였다. 또, timer_sleep()에서 wait_list에 일어나야 하는 시각 순으로 정렬하여 저장하여 wait_list의 앞의 원소부터 비교하여 더 자야할 thread를 발견하면 더 이상 탐색하지 않아도 된다.
+
+---- SYNCHRONIZATION ----
+
+>> A4: How are race conditions avoided when multiple threads call
+>> timer_sleep() simultaneously?
+timer_sleep()과 timer_interrupt() 안에서 interrupt를 disable함으로써 동시에 여러개의 thread들이 wait_list의 data structure를 조작할 수 없게 한다.
+
+>> A5: How are race conditions avoided when a timer interrupt occurs
+>> during a call to timer_sleep()?
+timer_sleep()과 timer_interrupt() 안에서 interrupt를 disable함으로써 그 동안은 timer interrupt가 일어나지 않게 되어 race condition을 방지할 수 있다.
+
+---- RATIONALE ----
+
+>> A6: Why did you choose this design?  In what ways is it superior to
+>> another design you considered?
+처음에는 timer_sleep() 함수에서 wait_list에 정렬없이 thread와 정보를 넣고, timer_interrupt() 함수에서 wait_list를 탐색하여 일어나야 하는 thread들이 있다면 깨웠다. 
+하지만 이 디자인은 매 tick마다 wait_list를 처음부터 끝까지 탐색하기 때문에 비효율적이라고 생각하였다. 
+이를 개선하기 위해, timer_sleep() 함수에서 wait_list에 넣을 때, 일어나야 할 시각 순으로 정렬해서, timer_interrupt() 함수에서는 A2,A3에서 언급한 대로 break문을 사용하였다.
+첫 번째 디자인보다 우리가 택한 이 디자인이 매 tick마다 불려지는 핸들러 함수, timer_interrupt()에서 소비하는 시간이 짧아서 더 좋다.
+
+			 PRIORITY SCHEDULING
+			 ===================
+
+---- DATA STRUCTURES ----
+
+>> B1: Copy here the declaration of each new or changed `struct' or
+>> `struct' member, global or static variable, `typedef', or
+>> enumeration.  Identify the purpose of each in 25 words or less.
+/* thread.h 파일 안 */
+struct thread
+{
+  /* Owned by thread.c. */
+  tid_t tid;                          /* Thread identifier. */
+  enum thread_status status;          /* Thread state. */
+  char name[16];                      /* Name (for debugging purposes). */
+  uint8_t *stack;                     /* Saved stack pointer. */
+  int priority;                       /* Priority. */
+  int own_priority;
+  /* Shared between thread.c and synch.c. */
+  struct list_elem elem;              /* List element. */
+#ifdef USERPROG
+  /* Owned by userprog/process.c. */
+  uint32_t *pagedir;                  /* Page directory. */
+#endif
+  /* Owned by thread.c. */
+  unsigned magic;                     /* Detects stack overflow. */
+  struct list donated_list;
+  struct thread *donee;
+  struct lock *donees_lock;
+};
+/* thread의 structure이다. 추가 사항은 다음과 같다.
+int own_priority : donate 받았을 때 자신의 원래, 고유의 priority를 기억하기 위해 있다.
+struct list donated_list : 이 thread가 donate 받은 priority와 이 donation을 매개한 lock에 대한 정보들을 담고 있는 donated_elem의 list이다.
+struct thread *donee : 이 thread가 donate 해준 thread를 가리킨다.
+struct lock *donees_lock: 이 thread와 donee thread 사이의 donation을 매개한 lock을 가리킨다.*/
+
+struct donated_elem
+{
+  struct lock *lock;
+  int priority;
+  struct list_elem elem;
+};
+/* thread struct 안에 있는 donated_list의 원소 elem을 멤버로 가지고 있다. 
+이 donated_list가 속한 thread가 donate받은 priority와, 이 donation을 매개한 lock의 포인터도 멤버로 갖고 있다.
+thread L이 소유한 lock을 thread H가 acquire하여 priority donation이 일어난 경우, thread H의 priority와 해당 lock에 대한 정보를 thread L에서 참조할 수 있게 한다.
+즉, 후에 thread L이 자신의 priority를 결정하기 위해 사용하는 struct이다. */
+
+>> B2: Explain the data structure used to track priority donation.
+>> Use ASCII art to diagram a nested donation.  (Alternately, submit a
+>> .png file.)
+
+priority donation을 따라가기 위한 data structure에 대한 설명은, 아래에 nested donation 그림을 설명하면서 같이 하겠다.
+
+<nested donation>
+아래에 3개의 thread A, B, C의 그림을 그려보았다. 
+그림 오른쪽에 적은 것처럼 ------------위에 있는 값은 위에서부터 priority, own_priority, donee를 나타낸다. 
+priority는 donate 받은 것을 포함해 계산한 현재 priority이고, 
+own_priority는 donate 받기 전 원래 priority, 
+donee는 자신이 donate 해준 thread를 가리키는 포인터이다.
+------------밑의 부분은 donated_list를 나타내며, 
+자신이 donate 받은 priority와, 그 donation을 매개한 해당 lock의 포인터와 묶인 elem을 원소로 가진다.
+=======	=======	=======
+| thr A 	|	| thr B	|	| thr C	|                
+| 10	|	| 20	|	| 30	|                priority
+| 10	|	| 20	|	| 30	|                own_priority
+| Null	|	| Null	|	| Null	|                donee
+------------	------------	------------    
+|	|	|	|	|	|                donated_list
+|	|	|	|	|	|
+=======	=======	=======
+
+thread A를 holder로 갖는 lock D에 대해, thread B가 lock_acquire(lock D) 함수를 실행했을 때,
+1) A와 B사이 priority donation이 처음으로 일어나는 경우이므로, B의 donee를 lock D의 holder인 A로 바꾼다.
+2) A의 own_priority = A의 priority < B의 priority이므로 A의 priority에 B의 priority를 넣고, donated list에 lock D의 포인터와 B의 priority를 가진 donated_elem을 추가한다.
+3) lock_acquire(lock D)에서 sema_down()을 부르면 thread B가 block된다.
+=======	=======	=======
+| thr A 	|	| thr B	|	| thr C	|                
+| 20	|	| 20	|	| 30	|                priority
+| 10	|	| 20	|	| 30	|                own_priority
+| Null	|  <-----	| A	|	| Null	|                donee
+------------	------------	------------    
+| lock D	|	|	|	|	|                donated_list
+| 20	|	|	|	|	|
+=======	=======	=======
+
+thread B를 holder로 갖는 lock E에 대해, thread C가 lock_acquire(lock E) 함수를 실행했을 때,
+1) B와 C사이 priority donation이 처음으로 일어나는 경우이므로, C의 donee를 lock E의 holder인 B로 바꾼다.
+2) B의 own_priority = B의 priority < C의 priority이므로 B의 priority에 C의 priority(30)를 넣고, donated_list에 lock E의 포인터와 C의 priority를 가진 donated_elem을 추가한다.
+3) B와 B의 donee(thread A)사이에서 2)의 과정을 행한다. 즉,  A의 own_priority < A의 priority < B의 priority(=30으로 변경된 상태)이므로 A의 priority를 30으로 바꾸고, donated_list에서 lock D의 포인터를 가진 donated_elem을 찾아 함께 묶인 priority를 30으로 변경한다.
+*이 때, A와 B사이에는 이미 donation이 일어나 있고,  donated priority를 수정해야 할 뿐이므로 B의 donee를 A로 설정하는, 1)과 유사한 과정은 필요가 없다.
+4) 3)을 donee가 Null이 아닐 때까지만 반복하여 필요한 경우에 donee의 priority를 바꾸고 donated_list를 업데이트한다.
+5) lock_acquire(lock E)에서 sema_down()을 부르면 thread C가 block된다.
+=======	=======	=======
+| thr A 	|	| thr B	|	| thr C	|                
+| 30	|	| 30	|	| 30	|                priority
+| 10	|	| 20	|	| 30	|                own_priority
+| Null	|  <-----	| A	|  <-----	| B	|                donee
+------------	------------	------------    
+| lock D	|	| lock E	|	|	|                donated_list
+| 30	|	| 30	|	|	|
+=======	=======	=======.
+
+thread A가 lock D를 lock_release(lock D)했을 때,
+1) donated_list에서 lock D를 포함한 donated_elem을 지운다.
+2) 남은 donated_elem들의 priority와 own_priority를 비교하여 가장 높은 것(10)을 priority로 바꾼다.
+3) lock_release(lock D)에서 sema_up()을 부르면 thread B가 unblock된다.
+4) B에서 실행했던 lock_acquire(lock D)로 돌아와 donee를 Null로 바꾼다.
+=======	=======	=======
+| thr A 	|	| thr B	|	| thr C	|                
+| 10	|	| 30	|	| 30	|                priority
+| 10	|	| 20	|	| 30	|                own_priority
+| Null	|  	| Null	|  <-----	| B	|                donee
+------------	------------	------------    
+| 	|	| lock E	|	|	|                donated_list
+| 	|	| 30	|	|	|
+=======	=======	=======
+
+thread B가 lock E를 lock_release(lock E)했을 때,
+1) donated_list에서 lock E를 포함한 donated_elem을 지운다.
+2) 남은 donated_elem들의 priority와 own_priority를 비교하여 가장 높은 것(20)을 priority로 바꾼다.
+3) lock_release(lock E)에서 sema_up()을 부르면 thread C가 unblock된다.
+4) C에서 실행했던 lock_acquire(lock E)로 돌아와 donee를 Null로 바꾼다.
+=======	=======	=======
+| thr A 	|	| thr B	|	| thr C	|                
+| 10	|	| 20	|	| 30	|                priority
+| 10	|	| 20	|	| 30	|                own_priority
+| Null	|  	| Null	|  	| Null	|                donee
+------------	------------	------------    
+| 	|	| 	|	|	|                donated_list
+| 	|	| 	|	|	|
+=======	=======	=======
+
+<multiple donation - B2 문제에서는 묻지 않았지만 이해를 돕기 위해 첨부함.>
+아래 그림에 3개의 thread A, B, C가 있다. 구성은 nested donation과 동일하다.
+=======	=======	=======
+| thr A 	|	| thr B	|	| thr C	|                
+| 10	|	| 20	|	| 30	|                priority
+| 10	|	| 20	|	| 30	|                own_priority
+| Null	|	| Null	|	| Null	|                donee
+------------	------------	------------    
+|	|	|	|	|	|                donated_list
+|	|	|	|	|	|
+=======	=======	=======
+
+thread A를 holder로 갖는 lock D에 대해, thread B가 lock_acquire(lock D) 함수를 실행했을 때,
+1) A와 B사이 priority donation이 처음으로 일어나는 경우이므로, B의 donee를 lock D의 holder인 A로 바꾼다.
+2) A의 own_priority = A의 priority < B의 priority이므로 A의 priority에 B의 priority를 넣고, donated list에 lock D의 포인터와 B의 priority를 가진 donated_elem을 추가한다.
+3) lock_acquire(lock D)에서 sema_down()을 부르면 thread B가 block된다.
+=======	=======	=======
+| thr A 	|	| thr B	|	| thr C	|
+| 20	|	| 20	|	| 30	|                priority
+| 10	|	| 20	|	| 30	|                own_priority
+| Null	|  <-----	| A	|	| Null	|                donee
+------------	=======	=======
+| lock D	|                                                                  donated_list
+| 20	|
+| 	|
+| 	|	
+=======
+
+thread A를 holder로 갖는 lock E에 대해, thread C가 lock_acquire(lock E) 함수를 실행했을 때,
+1) A와 C사이 priority donation이 처음으로 일어나는 경우이므로, C의 donee를 lock E의 holder인 A로 바꾼다.
+2) A의 own_priority < A의 priority < C의 priority이므로 A의 priority에 C의 priority를 넣고, donated list에 lock E의 포인터와 C의 priority를 가진 donated_elem을 추가한다.
+3) lock_acquire(lock E)에서 sema_down()을 부르면 thread C가 block된다.
+=======	=======	=======
+| thr A 	|	| thr B	|	| thr C	|
+| 30	|	| 20	|	| 30	|                priority
+| 10	|	| 20	|	| 30	|                own_priority
+| Null	|  <-----	| A	|	| A	|                donee
+------------	=======	=======
+| lock D	|  <----------------------------	                             donated_list
+| 20	|
+| lock E	|
+| 30	|	
+=======
+
+thread A가 lock D를 lock_release(lock D)했을 때,
+1) donated_list에서 lock D를 포함한 donated_elem을 지운다.
+2) 남은 donated_elem들의 priority와 own_priority를 비교하여 가장 높은 것(30)을 priority로 바꾼다.
+3) lock_release(lock D)에서 sema_up()을 부르면 thread B가 unblock된다.
+4) lock_release(lock D) 함수 안에서 thread_yield()가 불려도 여전히 제어권은 A에 있다
+=======	=======	=======
+| thr A 	|	| thr B	|	| thr C	|
+| 30	|	| 20	|	| 30	|                priority
+| 10	|	| 20	|	| 30	|                own_priority
+| Null	|  	| A	|	| A	|                donee
+------------	=======	=======
+| 	|  <----------------------------	                             donated_list
+| 	|
+| lock E	|
+| 30	|	
+=======
+
+thread A가 lock E를 lock_release(lock E)했을 때,
+1) donated_list에서 lock E를 포함한 donated_elem을 지운다.
+2) 남은 donated_elem들의 priority와 own_priority를 비교하여 가장 높은 것(10)을 priority로 바꾼다.
+3) lock_release(lock E)에서 sema_up()을 부르면 thread C가 unblock된다.
+4) C에서 실행했던 lock_acquire(lock E)로 돌아와 donee를 Null로 바꾼다.
+5) 나중에 C가 종료되는 등의 이유로 B로 제어권이 넘어오면, 실행했던 lock_acquire(lock D)로 돌아와 donee를 Null로 바꾼다.
+=======	=======	=======
+| thr A 	|	| thr B	|	| thr C	|
+| 10	|	| 20	|	| 30	|                priority
+| 10	|	| 20	|	| 30	|                own_priority
+| Null	|  	| Null	|	| Null	|                donee
+------------	=======	=======
+| 	|                                                                  donated_list
+| 	|
+|	|
+| 	|	
+=======
+
+---- ALGORITHMS ----
+
+>> B3: How do you ensure that the highest priority thread waiting for
+>> a lock, semaphore, or condition variable wakes up first?
+1) lock : lock에서는 lock의 holder가 lock_release() 함수를 호출하면 lock을 기다리는 thread가 깨어나게 되는데, lock_release() 함수 안에서 호출되는 sema_up() 함수를 통해 thread가 unblock이 된다. 이때 sema_up() 함수에서 waiting list안의 가장 큰 priority를 가지는 thread를 unblock하게 구현 했기 때문에 무조건 가장 큰 priority를 가지는 thread가 먼저 깨어나게 된다.
+2) semaphore : lock과 같이 sema_up() 함수에 의해 waiting list의 가장 큰 priority를 가지는 thread가 깨어나게 된다.
+3) condition variable : 가지고 있는 semaphore들 중 가장 큰 priority의 thread를 가지고 있는 semaphore를 찾아 그 semaphore를 sema_up() 한다. 따라서 가장 큰 priority를 가지는 thread가 먼저 깨어나게 된다.
+
+>> B4: Describe the sequence of events when a call to lock_acquire()
+>> causes a priority donation.  How is nested donation handled?
+<priority donation이 발생하는 경우 일어나는 일> = <holder가 있는 lock에 대해 그 holder보다 큰 priority를 가지는 thread가 lock_acquire()함수를 부른 경우 일어나는 일>을 파악하기 위해서 우선 lock_acquire() 함수 안의 코드를 살펴보면,
+---------------------------------------lock_acquire(*lock) 함수 안 코드분석-------------------------------------------------
+owner = lock->holder; //'donee후보'
+acquirer = 현재 thread; //'donor후보'
+temp_lock = lock; //owner와 acquirer사이 매개가 되는 해당 lock
+
+/* priority donation이 처음 일어나는 경우, acquirer의 donee 정보를 설정해줌 */
+owner가 NULL이 아니고, owner의 own_priority가 acquirer의 priority보다 작은 경우
+    acquirer->donee = owner;
+    acquirer->donees_lock = temp_lock;
+
+while(owner != NULL){ //donee후보가 있을 동안, donation이 필요한 경우에 해주어야 한다.
+  /* own_priority와 비교하는 이유는, donate 받아 상승한 priority와 기존의 own_priority 사이의 priority를 donate 받은 경우도 donated_list에 추가하기 위해서이다. */ 
+  /* owner와 acquirer 사이에 donation이 처음 일어나거나, 이미 donate받은 priority에 변경을 해주어야 하는 경우 */
+  owner의 own_priority가 acquirer의 priority보다 작은 경우 
+
+    /* owner의 priority도 acquirer의 priority보다 작은 경우 */    
+    priority change가 필요한 경우
+      owner->priority = acquirer->priority;
+    
+    /*owner의 donated_list를 업데이트해줌*/
+    owner->donated_list에 temp_lock의 정보가 있으면 priority만 acquirer의 것으로 바꿔주고 
+    없으면 temp_lock과 acquirer의 priority를 묶어서 추가시켜줌
+  
+  /*nested donation을 다루기 위해, donee후보와 donor후보, 해당 lock을 업데이트 해 줌*/
+  temp_lock = owner->donees_lock; //다음 loop의 해당 lock은 예전에 owner->donees_lock에 저장된 lock이 됨.
+  acquirer = owner; //현재의 donee후보(owner)가 다음 loop에서는 donor후보가 됨.
+  owner = acquirer->donee; //다음 loop의 donee 후보는, 다음 loop에서 donor후보의 donee임.
+}
+
+sema_down //holder에 의해 lock이 풀리기 전까지 기다림.
+현재 thread의 donee, donees_lock을 NULL로 초기화.
+lock->holder를 현재 thread로 업데이트
+---------------------------------------------------------------------------------------------------------------------------------
+따라서 B4문제에서 물어본 경우에 발생하는 일들은, 
+lock의 holder와 현재 thread간 priority donation이 처음 일어나는 것이므로, donee정보가 잘 세팅된다. 이후 lock_acquirer()안의 while문에 적어도 한 번 들어가게 되며, 첫 번째 루프는 priority donation이 새로 일어나는 경우로 donated_list가 잘 추가/수정되어진다. nested donation이 필요할 가능성이 있는 경우에는(=donee 후보가 있을 동안), 계속 while loop를 돌면서 필요한 경우에 donated_list를 수정하여 nested donation을 잘 다루어 준다.
+
+>> B5: Describe the sequence of events when lock_release() is called
+>> on a lock that a higher-priority thread is waiting for.
+higher-priority thread가, 현재 thread가 holder인 lock에 대해 lock_acquire() 함수를 불렀어서 기다리고 있는 경우이다.
+이때, 기다리고 있는 thread가 부른 lock_acquire() 함수 안에서는, B4 문제에서 언급한 바와 같이, priority donation이 일어났을 것이다. 우선 lock_release()함수 안의 코드를 살펴보면,
+---------------------------------------lock_release(*lock) 함수 안 코드분석-------------------------------------------------
+lock_holder를 NULL로 초기화
+sema_up //이 lock을 기다리고 있는 가장 높은 priority의 thread를 깨움
+
+현재 thread의 donated_list안에 이 lock에 대한 정보가 있다면, //이 lock을 매개로 priority donation이 일어났었다면,
+이 lock에 대한 정보를 지우고, priority를 donated_list안의 남은 정보 중 가장 높은 priority로(혹은 남아있지 않다면 own_priority로) 바꿔줌.
+
+thread_yield(); 
+---------------------------------------------------------------------------------------------------------------------------------
+따라서 B5문제에서 물어본 경우에 발생하는 일들은, 
+lock_holder를 비워주고, higher-priority thread를 깨우고(이 thread가 이 lock을 기다리는 thread 중 가장 높은 것이라면), 현재 thread의 donated_list에서 이 lock에 대한 정보를 지운 후에 priority를 위의 코드분석에서 언급한 것처럼 바꾸어준다. 이후, 현재 thread의 priority가 일어난 thread의 priority보다 낮아진다면 yield함수에 의해 context switch가 일어날 것이다. 그러면 일어난 thread는 제어권을 받아 sema_down의 while문을 잘 탈출하고, lock_acquire() 함수 안의 sema_down 밑의 두 줄(B4의 코드분석 참고)로 잘 내려간다. 즉, 제어권을 가지고 donee, donees_lock(lock_release(*lock)함수를 부른 그 thread 및 argument가 가리키는 그 lock으로 설정되어 있음)을 초기화 해주고, lock_holder를 자기로 바꾼다.
+
+---- SYNCHRONIZATION ----
+
+>> B6: Describe a potential race in thread_set_priority() and explain
+>> how your implementation avoids it.  Can you use a lock to avoid
+>> this race?
+thread_set_priority()함수에서 current_thread의 donated_elem와 priority를 read/write하는데 이 도중 다른 thread에서도 lock_acquire() 함수를 통해 접근할 위험이 있다. 때문에 interrupt를 disable함으로써 이를 방지했다.
+하지만 lock을 사용해서 이 동기화 문제를 해결하려면, 다른 모든 thread가 이 데이터에 접근할 수 있기 때문에 thread 개수만큼의 lock이 필요하다. 이는 매우 비효율적이어서 락을 사용하기 힘들다.
+
+---- RATIONALE ----
+
+>> B7: Why did you choose this design?  In what ways is it superior to
+>> another design you considered?
+1)
+우리는 ready_list에 넣을 때에 정렬하는 대신, 뺄 때에 가장 큰 priority를 갖는 원소를 뺐다.
+정렬해서 넣는 것, 가장 큰 걸 빼는 것 모두 평균 O(n)의 cost가 든다. 다만 우리가 채택한 디자인은, thread_unblock()을 할 경우에 ready_list 탐색을 더 적게 한다. 그리고 첫 번째는 thread_set_priority()를 할 경우에 ready_list 탐색을 더 적게 한다. 따라서 우리의 디자인은 thread_unblock()을 thread_set_priority()보다 많이 사용할 경우에 더 유리하다.
+2)
+priority donation를 처리하기 위해 lock 포인터와 donate된 priority를 묶은 donated_elem을 리스트로 만들어서 thread struct안에 저장하였다.  이는 donate된 priority에 쉽게 접근할 수 있어 코딩을 간소화하고 처리과정을 줄일 수 있다. (lock list를 만들고, lock struct안에 donated_priority 멤버를 추가하는 것보다 접근이 쉽다.)
+
+			   SURVEY QUESTIONS
+			   ================
+
+Answering these questions is optional, but it will help us improve the
+course in future quarters.  Feel free to tell us anything you
+want--these questions are just to spur your thoughts.  You may also
+choose to respond anonymously in the course evaluations at the end of
+the quarter.
+
+>> In your opinion, was this assignment, or any one of the three problems
+>> in it, too easy or too hard?  Did it take too long or too little time?
+
+>> Did you find that working on a particular part of the assignment gave
+>> you greater insight into some aspect of OS design?
+
+>> Is there some particular fact or hint we should give students in
+>> future quarters to help them solve the problems?  Conversely, did you
+>> find any of our guidance to be misleading?
+
+>> Do you have any suggestions for the TAs to more effectively assist
+>> students, either for future quarters or the remaining projects?
+
+>> Any other comments?
